@@ -1,0 +1,84 @@
+name: Deploy WCI preview
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: WestCoastInvitational/WestCoastInvitational.org
+  SOURCE_BRANCH: dev
+  PREVIEW_URL: https://arushyadlapati.github.io/wci-preview
+  LIVE_SITE: https://www.westcoastinvitational.org
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.compare.outputs.sha }}
+      changed: ${{ steps.compare.outputs.changed }}
+    steps:
+      - name: Compare dev with the deployed commit
+        id: compare
+        run: |
+          sha=$(git ls-remote "https://github.com/$SOURCE_REPO.git" "refs/heads/$SOURCE_BRANCH" | cut -f1)
+          if [ -z "$sha" ]; then
+            echo "Could not resolve $SOURCE_BRANCH on $SOURCE_REPO" >&2
+            exit 1
+          fi
+          deployed=$(curl -fsS "$PREVIEW_URL/commit.txt?run=$GITHUB_RUN_ID" || true)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$sha" != "$deployed" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the org repo's dev branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          ref: ${{ needs.check.outputs.sha }}
+          path: source
+          persist-credentials: false
+
+      - name: Build the preview
+        env:
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          mkdir _site
+          cp -R source/prototype/. _site/
+          # Keep the test copy out of search results so it can't compete with the real domain.
+          sed -i 's#<head>#<head>\n    <meta name="robots" content="noindex, nofollow">#' _site/index.html
+          grep -q 'name="robots" content="noindex' _site/index.html
+          # Root links like /apply only exist on the live site.
+          sed -i -E "s#href=\"/([a-z])#href=\"$LIVE_SITE/\1#g" _site/index.html
+          echo "$SHA" > _site/commit.txt
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
