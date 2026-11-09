@@ -16,7 +16,6 @@ env:
   SOURCE_REPO: WestCoastInvitational/WestCoastInvitational.org
   SOURCE_BRANCH: dev
   PREVIEW_URL: https://arushyadlapati.github.io/wci-preview
-  LIVE_SITE: https://www.westcoastinvitational.org
 
 jobs:
   check:
@@ -41,17 +40,11 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-  deploy:
+  # Installing and building runs the project's code, so this job can't write to anything.
+  build:
     needs: check
     if: needs.check.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out the org repo's dev branch
         uses: actions/checkout@v4
@@ -61,24 +54,52 @@ jobs:
           path: source
           persist-credentials: false
 
-      - name: Build the preview
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: source/site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: source/site
+        run: npm ci
+
+      - name: Build the site
+        working-directory: source/site
+        env:
+          BASE_PATH: /wci-preview
+          PUBLIC_NOINDEX: "true"
+        run: npm run build
+
+      - name: Confirm the test copy stays out of search results
+        working-directory: source/site
+        run: |
+          total=$(find dist -name index.html | xargs grep -L 'http-equiv="refresh"' | wc -l)
+          marked=$(find dist -name index.html | xargs grep -l 'name="robots" content="noindex' | wc -l)
+          echo "pages: $total, marked noindex: $marked"
+          [ "$total" -gt 0 ] && [ "$marked" -ge "$total" ]
+
+      - name: Record the deployed commit
         env:
           SHA: ${{ needs.check.outputs.sha }}
-        run: |
-          mkdir _site
-          cp -R source/prototype/. _site/
-          # Keep the test copy out of search results so it can't compete with the real domain.
-          sed -i 's#<head>#<head>\n    <meta name="robots" content="noindex, nofollow">#' _site/index.html
-          grep -q 'name="robots" content="noindex' _site/index.html
-          # Root links like /apply only exist on the live site.
-          sed -i -E "s#href=\"/([a-z])#href=\"$LIVE_SITE/\1#g" _site/index.html
-          echo "$SHA" > _site/commit.txt
+        run: echo "$SHA" > source/site/dist/commit.txt
 
       - name: Upload the site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: source/site/dist
 
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
